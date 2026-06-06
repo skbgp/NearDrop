@@ -206,7 +206,9 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 	public static let shared=NearbyConnectionManager()
 	
 	override init() {
-		tcpListener=try! NWListener(using: NWParameters(tls: .none))
+		let params = NWParameters(tls: .none)
+		params.includePeerToPeer = true
+		tcpListener=try! NWListener(using: params)
 		super.init()
 	}
 	
@@ -251,6 +253,7 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 		
 		let port:Int32=Int32(tcpListener.port!.rawValue)
 		mdnsService=NetService(domain: "", type: "_FC9F5ED42C8A._tcp.", name: name, port: port)
+		mdnsService?.includesPeerToPeer=true
 		mdnsService?.delegate=self
 		mdnsService?.setTXTRecord(NetService.data(fromTXTRecord: [
 			"n": endpointInfo.serialize().urlSafeBase64EncodedString().data(using: .utf8)!
@@ -278,7 +281,9 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 		if discoveryRefCount==0{
 			foundServices.removeAll()
 			if browser==nil{
-				browser=NWBrowser(for: .bonjourWithTXTRecord(type: "_FC9F5ED42C8A._tcp.", domain: nil), using: .tcp)
+				let params = NWParameters.tcp
+				params.includePeerToPeer = true
+				browser=NWBrowser(for: .bonjourWithTXTRecord(type: "_FC9F5ED42C8A._tcp.", domain: nil), using: params)
 				browser?.browseResultsChangedHandler={newResults, changes in
 					for change in changes{
 						switch change{
