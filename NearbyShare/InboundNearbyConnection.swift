@@ -14,6 +14,7 @@ import AppKit
 
 import SwiftECC
 import BigInt
+import os.log
 
 class InboundNearbyConnection: NearbyConnection{
 	
@@ -100,7 +101,11 @@ class InboundNearbyConnection: NearbyConnection{
 	
 	override func processFileChunk(frame: Location_Nearby_Connections_PayloadTransferFrame) throws{
 		let id=frame.payloadHeader.id
-		if canceledPayloadIDs.contains(id) { return }
+		if canceledPayloadIDs.contains(id) {
+			os_log("NearDrop: Ignoring chunk for canceled payload %lld", id)
+			return
+		}
+		os_log("NearDrop: processFileChunk for id %lld, offset %lld, size %d, flags %d", id, frame.payloadChunk.offset, frame.payloadChunk.body.count, frame.payloadChunk.flags)
 		guard let fileInfo=transferredFiles[id] else { throw NearbyError.protocolError("File payload ID \(id) is not known") }
 		let currentOffset=fileInfo.bytesTransferred
 		guard frame.payloadChunk.offset==currentOffset else { throw NearbyError.protocolError("Invalid offset into file \(frame.payloadChunk.offset), expected \(currentOffset)") }
@@ -402,39 +407,32 @@ class InboundNearbyConnection: NearbyConnection{
 	}
 	
 	public func cancelPayload(id: Int64) {
-		guard let fileInfo = transferredFiles[id] else { return }
-		
-		var transferFrame = Location_Nearby_Connections_PayloadTransferFrame()
-		transferFrame.packetType = .control
-		
-		var header = Location_Nearby_Connections_PayloadTransferFrame.PayloadHeader()
-		header.id = id
-		transferFrame.payloadHeader = header
-		
-		var control = Location_Nearby_Connections_PayloadTransferFrame.ControlMessage()
-		control.event = .payloadCanceled
-		if let fileInfo = transferredFiles[id] {
-			control.offset = fileInfo.bytesTransferred
+		os_log("NearDrop: cancelPayload called for id %lld", id)
+		guard let fileInfo = transferredFiles[id] else {
+			os_log("NearDrop: fileInfo not found for id %lld in cancelPayload", id)
+			return
 		}
-		transferFrame.controlMessage = control
 		
-		var offlineFrame = Location_Nearby_Connections_OfflineFrame()
-		offlineFrame.version = .v1
-		offlineFrame.v1.type = .payloadTransfer
-		offlineFrame.v1.payloadTransfer = transferFrame
+		// DO NOT send a payloadCanceled control packet to Android.
+		// In the Nearby Share protocol, payloadCanceled is a sender→receiver signal.
+		// When the receiver sends it, Android interprets it as an abort of the entire
+		// transfer session and closes the TCP connection, preventing subsequent files
+		// from being transferred. Instead, we silently mark this payload as canceled
+		// and discard its remaining chunks in processFileChunk. Android will finish
+		// sending this file's data naturally, then proceed to the next file.
 		
-		try? encryptAndSendOfflineFrame(offlineFrame)
+		canceledPayloadIDs.insert(id)
+		os_log("NearDrop: Marked payload %lld as canceled (silent discard, no control packet sent)", id)
 		
+		// Clean up the file handle and progress bar immediately
 		try? fileInfo.fileHandle?.close()
 		fileInfo.progress?.unpublish()
-		try? FileManager.default.removeItem(at: fileInfo.destinationURL)
 		transferredFiles.removeValue(forKey: id)
-		canceledPayloadIDs.insert(id)
 		
-		// If there are no more files, gracefully disconnect the connection
-		if transferredFiles.isEmpty {
-			try? sendDisconnectionAndDisconnect()
-		}
+		// Delete the partial file from disk
+		try? FileManager.default.removeItem(at: fileInfo.destinationURL)
+		
+		os_log("NearDrop: Cleanup done for canceled payload %lld. Remaining files: %d", id, transferredFiles.count)
 	}
 	
 	private func rejectTransfer(with reason:Sharing_Nearby_ConnectionResponseFrame.Status = .reject){

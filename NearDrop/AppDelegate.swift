@@ -301,16 +301,6 @@ struct TransferRow: View {
                 Text(formatBytes(transfer.bytesTransferred) + " / " + formatBytes(transfer.totalBytes))
                 Spacer()
                 Text(formatSpeed(transfer.speedBytesPerSecond) + " - " + formatTimeRemaining(transfer: transfer))
-                
-                Button(action: {
-                    NearbyConnectionManager.shared.cancelIncomingTransfer(payloadId: transfer.id, connectionId: transfer.connectionId)
-                    ProgressStateManager.shared.removeTransfer(id: transfer.id)
-                }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(PlainButtonStyle())
-                .padding(.leading, 4)
             }
             .font(.caption)
             .foregroundColor(.secondary)

@@ -343,7 +343,11 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 	
 	public func cancelIncomingTransfer(payloadId: String, connectionId: String) {
 		guard let id = Int64(payloadId) else { return }
-		activeConnections[connectionId]?.cancelPayload(id: id)
+		if let connection = activeConnections[connectionId] as? InboundNearbyConnection {
+			NearbyConnection.dispatchQueue.async {
+				connection.cancelPayload(id: id)
+			}
+		}
 	}
 	
 	private func endpointID(for service:NWBrowser.Result)->String?{

@@ -13,10 +13,11 @@ import System
 
 import SwiftECC
 import BigInt
+import os.log
 
 class NearbyConnection{
 	internal static let SANE_FRAME_LENGTH=5*1024*1024
-	private static let dispatchQueue=DispatchQueue(label: "me.grishka.NearDrop.queue", qos: .userInitiated) // FIFO (non-concurrent) queue to avoid those exciting concurrency bugs
+	internal static let dispatchQueue=DispatchQueue(label: "me.grishka.NearDrop.queue", qos: .userInitiated) // FIFO (non-concurrent) queue to avoid those exciting concurrency bugs
 	
 	internal let connection:NWConnection
 	internal var remoteDeviceInfo:RemoteDeviceInfo?
@@ -262,6 +263,20 @@ class NearbyConnection{
 		if offlineFrame.hasV1 && offlineFrame.v1.hasType, case .payloadTransfer = offlineFrame.v1.type {
 			guard offlineFrame.v1.hasPayloadTransfer else { throw NearbyError.requiredFieldMissing("offlineFrame.v1.payloadTransfer") }
 			let payloadTransfer=offlineFrame.v1.payloadTransfer
+			
+			if payloadTransfer.packetType == .control {
+				os_log("NearDrop: received control packet. event=%d", payloadTransfer.controlMessage.event.rawValue)
+				if payloadTransfer.hasControlMessage && payloadTransfer.controlMessage.event == .payloadCanceled {
+					if payloadTransfer.hasPayloadHeader {
+						if let inb = self as? InboundNearbyConnection {
+							inb.canceledPayloadIDs.insert(payloadTransfer.payloadHeader.id)
+							os_log("NearDrop: Android canceled payload id %lld", payloadTransfer.payloadHeader.id)
+						}
+					}
+				}
+				return
+			}
+
 			let header=payloadTransfer.payloadHeader;
 			let chunk=payloadTransfer.payloadChunk;
 			guard header.hasType, header.hasID else { throw NearbyError.requiredFieldMissing("payloadHeader.type|id") }
