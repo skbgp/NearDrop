@@ -17,6 +17,9 @@ class ShareViewController: NSViewController, ShareExtensionDelegate{
 	private var chosenDevice:RemoteDeviceInfo?
 	private var lastError:Error?
 	private var sheetWindow:NSWindow?
+	private var lastSpeedUpdateTime:Date?
+	private var lastBytesSent:Int64=0
+	private var currentSpeed:Double=0
 	
 	@IBOutlet var filesIcon:NSImageView?
 	@IBOutlet var filesLabel:NSTextField?
@@ -260,8 +263,41 @@ class ShareViewController: NSViewController, ShareExtensionDelegate{
 		progressState?.stringValue=NSLocalizedString("Sending", value: "Sending...", comment: "")
 	}
 	
-	func transferProgress(progress: Double) {
+	func transferProgress(progress: Double, bytesSent: Int64, totalBytes: Int64) {
 		progressProgressBar!.doubleValue=progress*progressProgressBar!.maxValue
+		
+		let now = Date()
+		if let lastTime = lastSpeedUpdateTime {
+			let timeDiff = now.timeIntervalSince(lastTime)
+			if timeDiff > 0.5 {
+				let bytesDiff = bytesSent - lastBytesSent
+				currentSpeed = Double(bytesDiff) / timeDiff
+				lastSpeedUpdateTime = now
+				lastBytesSent = bytesSent
+			}
+		} else {
+			lastSpeedUpdateTime = now
+			lastBytesSent = bytesSent
+		}
+		
+		let sentStr = ByteCountFormatter.string(fromByteCount: bytesSent, countStyle: .file)
+		let totalStr = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+		var statusText = "\(sentStr) / \(totalStr)"
+		
+		if currentSpeed > 0 {
+			let speedStr = ByteCountFormatter.string(fromByteCount: Int64(currentSpeed), countStyle: .file)
+			let remainingBytes = totalBytes - bytesSent
+			let secondsLeft = Int(Double(remainingBytes) / currentSpeed)
+			let etaStr: String
+			if secondsLeft < 60 {
+				etaStr = "\(secondsLeft)s left"
+			} else {
+				etaStr = "\(secondsLeft / 60)m \(secondsLeft % 60)s left"
+			}
+			statusText += " — \(speedStr)/s — \(etaStr)"
+		}
+		
+		progressState?.stringValue = statusText
 	}
 	
 	func transferFinished() {

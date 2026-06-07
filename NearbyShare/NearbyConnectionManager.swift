@@ -181,7 +181,7 @@ public protocol ShareExtensionDelegate:AnyObject{
 	func connectionWasEstablished(pinCode:String)
 	func connectionFailed(with error:Error)
 	func transferAccepted()
-	func transferProgress(progress:Double)
+	func transferProgress(progress:Double, bytesSent:Int64, totalBytes:Int64)
 	func transferFinished()
 }
 
@@ -481,10 +481,10 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 		}
 	}
 	
-	func outboundConnection(connection: OutboundNearbyConnection, transferProgress: Double) {
+	func outboundConnection(connection: OutboundNearbyConnection, transferProgress: Double, bytesSent: Int64, totalBytes: Int64) {
 		guard let transfer=outgoingTransfers[connection.id] else {return}
 		DispatchQueue.main.async {
-			transfer.delegate.transferProgress(progress: transferProgress)
+			transfer.delegate.transferProgress(progress: transferProgress, bytesSent: bytesSent, totalBytes: totalBytes)
 		}
 	}
 	
