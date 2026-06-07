@@ -231,7 +231,7 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 			conn.delegate=self
 			conn.start()
 		}
-		tcpListener.start(queue: .global(qos: .utility))
+		tcpListener.start(queue: .global(qos: .userInitiated))
 	}
 	
 	private static func generateEndpointID()->[UInt8]{
@@ -338,6 +338,12 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 	public func cancelOutgoingTransfer(id:String){
 		guard let transfer=outgoingTransfers[id] else {return}
 		transfer.connection.cancel()
+		outgoingTransfers.removeValue(forKey: id)
+	}
+	
+	public func cancelIncomingTransfer(payloadId: String, connectionId: String) {
+		guard let id = Int64(payloadId) else { return }
+		activeConnections[connectionId]?.cancelPayload(id: id)
 	}
 	
 	private func endpointID(for service:NWBrowser.Result)->String?{

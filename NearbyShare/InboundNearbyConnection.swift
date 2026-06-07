@@ -100,6 +100,7 @@ class InboundNearbyConnection: NearbyConnection{
 	
 	override func processFileChunk(frame: Location_Nearby_Connections_PayloadTransferFrame) throws{
 		let id=frame.payloadHeader.id
+		if canceledPayloadIDs.contains(id) { return }
 		guard let fileInfo=transferredFiles[id] else { throw NearbyError.protocolError("File payload ID \(id) is not known") }
 		let currentOffset=fileInfo.bytesTransferred
 		guard frame.payloadChunk.offset==currentOffset else { throw NearbyError.protocolError("Invalid offset into file \(frame.payloadChunk.offset), expected \(currentOffset)") }
@@ -107,8 +108,13 @@ class InboundNearbyConnection: NearbyConnection{
 		if frame.payloadChunk.body.count>0{
 			fileInfo.fileHandle?.write(frame.payloadChunk.body)
 			transferredFiles[id]!.bytesTransferred+=Int64(frame.payloadChunk.body.count)
-			fileInfo.progress?.completedUnitCount=transferredFiles[id]!.bytesTransferred
-			delegate?.connection(connection: self, didUpdateProgress: transferredFiles[id]!.bytesTransferred, forTransfer: String(id))
+			let currentBytes = transferredFiles[id]!.bytesTransferred
+			let lastUIBytes = fileInfo.lastUIUpdateBytes
+			if currentBytes - lastUIBytes >= 1024 * 1024 || currentBytes == fileInfo.meta.size {
+				fileInfo.progress?.completedUnitCount = currentBytes
+				transferredFiles[id]!.lastUIUpdateBytes = currentBytes
+				delegate?.connection(connection: self, didUpdateProgress: currentBytes, forTransfer: String(id))
+			}
 		}else if (frame.payloadChunk.flags & 1)==1{
 			try fileInfo.fileHandle?.close()
 			transferredFiles[id]!.fileHandle=nil
@@ -130,8 +136,13 @@ class InboundNearbyConnection: NearbyConnection{
 		}else if let fileInfo=transferredFiles[id]{
 			fileInfo.fileHandle?.write(payload)
 			transferredFiles[id]!.bytesTransferred+=Int64(payload.count)
-			fileInfo.progress?.completedUnitCount=transferredFiles[id]!.bytesTransferred
-			delegate?.connection(connection: self, didUpdateProgress: transferredFiles[id]!.bytesTransferred, forTransfer: String(id))
+			let currentBytes = transferredFiles[id]!.bytesTransferred
+			let lastUIBytes = fileInfo.lastUIUpdateBytes
+			if currentBytes - lastUIBytes >= 1024 * 1024 || currentBytes == fileInfo.meta.size {
+				fileInfo.progress?.completedUnitCount = currentBytes
+				transferredFiles[id]!.lastUIUpdateBytes = currentBytes
+				delegate?.connection(connection: self, didUpdateProgress: currentBytes, forTransfer: String(id))
+			}
 			try fileInfo.fileHandle?.close()
 			transferredFiles[id]!.fileHandle=nil
 			fileInfo.progress?.unpublish()
@@ -387,6 +398,42 @@ class InboundNearbyConnection: NearbyConnection{
 		}catch{
 			lastError=error
 			protocolError()
+		}
+	}
+	
+	public func cancelPayload(id: Int64) {
+		guard let fileInfo = transferredFiles[id] else { return }
+		
+		var transferFrame = Location_Nearby_Connections_PayloadTransferFrame()
+		transferFrame.packetType = .control
+		
+		var header = Location_Nearby_Connections_PayloadTransferFrame.PayloadHeader()
+		header.id = id
+		transferFrame.payloadHeader = header
+		
+		var control = Location_Nearby_Connections_PayloadTransferFrame.ControlMessage()
+		control.event = .payloadCanceled
+		if let fileInfo = transferredFiles[id] {
+			control.offset = fileInfo.bytesTransferred
+		}
+		transferFrame.controlMessage = control
+		
+		var offlineFrame = Location_Nearby_Connections_OfflineFrame()
+		offlineFrame.version = .v1
+		offlineFrame.v1.type = .payloadTransfer
+		offlineFrame.v1.payloadTransfer = transferFrame
+		
+		try? encryptAndSendOfflineFrame(offlineFrame)
+		
+		try? fileInfo.fileHandle?.close()
+		fileInfo.progress?.unpublish()
+		try? FileManager.default.removeItem(at: fileInfo.destinationURL)
+		transferredFiles.removeValue(forKey: id)
+		canceledPayloadIDs.insert(id)
+		
+		// If there are no more files, gracefully disconnect the connection
+		if transferredFiles.isEmpty {
+			try? sendDisconnectionAndDisconnect()
 		}
 	}
 	

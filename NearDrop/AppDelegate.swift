@@ -163,6 +163,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 			UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "transferError_"+id, content: notificationContent, trigger: nil))
 		}
 		self.activeIncomingTransfers.removeValue(forKey: id)
+		ProgressStateManager.shared.removeTransfersForConnection(id: id)
 	}
 	
 	func incomingTransfer(id: String, didStartWith deviceName: String, fileName: String, totalBytes: Int64, connectionId: String) {
@@ -201,16 +202,19 @@ class TransferState: ObservableObject, Identifiable {
     }
     
     func update(bytes: Int64) {
-        DispatchQueue.main.async {
-            let now = Date()
-            let timeDiff = now.timeIntervalSince(self.lastUpdateTime)
-            if timeDiff > 0.5 {
-                let bytesDiff = bytes - self.lastBytesTransferred
+        let now = Date()
+        let timeDiff = now.timeIntervalSince(self.lastUpdateTime)
+        
+        // Update speed calculations and UI at most 10 times a second (or if finished)
+        if timeDiff > 0.1 || bytes == totalBytes {
+            let bytesDiff = bytes - self.lastBytesTransferred
+            if timeDiff > 0 {
+                // Calculate speed smoothly
                 self.speedBytesPerSecond = Double(bytesDiff) / timeDiff
-                self.lastUpdateTime = now
-                self.lastBytesTransferred = bytes
             }
-            self.bytesTransferred = bytes
+            self.lastUpdateTime = now
+            self.lastBytesTransferred = bytes
+            self.bytesTransferred = bytes // triggers SwiftUI update
         }
     }
 }
@@ -271,31 +275,50 @@ struct ProgressViewUI: View {
                     .frame(maxWidth: .infinity, alignment: .center)
             } else {
                 ForEach(manager.activeTransfers) { transfer in
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("\(transfer.deviceName) - \(transfer.fileName)")
-                            .font(.headline)
-                        
-                        ProgressView(value: Double(transfer.bytesTransferred), total: Double(max(1, transfer.totalBytes)))
-                            .progressViewStyle(LinearProgressViewStyle())
-                        
-                        HStack {
-                            Text(formatBytes(transfer.bytesTransferred) + " / " + formatBytes(transfer.totalBytes))
-                            Spacer()
-                            Text(formatSpeed(transfer.speedBytesPerSecond) + " - " + formatTimeRemaining(transfer: transfer))
-                        }
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    }
-                    .padding()
-                    .background(Color(NSColor.controlBackgroundColor))
-                    .cornerRadius(8)
-                    .shadow(radius: 1)
+                    TransferRow(transfer: transfer)
                 }
             }
         }
         .padding()
         .frame(width: 350)
         .background(Color(NSColor.windowBackgroundColor))
+    }
+}
+
+@available(macOS 11.0, *)
+struct TransferRow: View {
+    @ObservedObject var transfer: TransferState
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(transfer.deviceName) - \(transfer.fileName)")
+                .font(.headline)
+            
+            ProgressView(value: Double(transfer.bytesTransferred), total: Double(max(1, transfer.totalBytes)))
+                .progressViewStyle(LinearProgressViewStyle())
+            
+            HStack {
+                Text(formatBytes(transfer.bytesTransferred) + " / " + formatBytes(transfer.totalBytes))
+                Spacer()
+                Text(formatSpeed(transfer.speedBytesPerSecond) + " - " + formatTimeRemaining(transfer: transfer))
+                
+                Button(action: {
+                    NearbyConnectionManager.shared.cancelIncomingTransfer(payloadId: transfer.id, connectionId: transfer.connectionId)
+                    ProgressStateManager.shared.removeTransfer(id: transfer.id)
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.leading, 4)
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+        .shadow(radius: 1)
     }
     
     func formatBytes(_ bytes: Int64) -> String {

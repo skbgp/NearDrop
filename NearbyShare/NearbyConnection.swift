@@ -16,13 +16,15 @@ import BigInt
 
 class NearbyConnection{
 	internal static let SANE_FRAME_LENGTH=5*1024*1024
-	private static let dispatchQueue=DispatchQueue(label: "me.grishka.NearDrop.queue", qos: .utility) // FIFO (non-concurrent) queue to avoid those exciting concurrency bugs
+	private static let dispatchQueue=DispatchQueue(label: "me.grishka.NearDrop.queue", qos: .userInitiated) // FIFO (non-concurrent) queue to avoid those exciting concurrency bugs
 	
 	internal let connection:NWConnection
 	internal var remoteDeviceInfo:RemoteDeviceInfo?
 	private var payloadBuffers:[Int64:NSMutableData]=[:]
 	internal var encryptionDone:Bool=false
 	internal var transferredFiles:[Int64:InternalFileInfo]=[:]
+	internal var canceledPayloadIDs: Set<Int64> = []
+	private var readBuffer = Data()
 	public let id:String
 	internal var lastError:Error?
 	private var connectionClosed:Bool=false
@@ -96,49 +98,46 @@ class NearbyConnection{
 		return false
 	}
 	
-	private func receiveFrameAsync(){
-		connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { content, contentContext, isComplete, error in
-			if self.connectionClosed{
+	private func receiveFrameAsync() {
+		connection.receive(minimumIncompleteLength: 1, maximumLength: 1048576) { [weak self] content, contentContext, isComplete, error in
+			guard let self = self else { return }
+			if self.connectionClosed {
 				return
 			}
-			if isComplete{
+			if let content = content {
+				self.readBuffer.append(content)
+				self.processReadBuffer()
+			}
+			if isComplete {
 				self.handleConnectionClosure()
 				return
 			}
-			if !(error==nil){
-				self.lastError=error
+			if let error = error {
+				self.lastError = error
 				self.protocolError()
 				return
 			}
-			guard let content=content else {
-				assertionFailure()
-				return
-			}
-			let frameLength:UInt32=UInt32(content[0]) << 24 | UInt32(content[1]) << 16 | UInt32(content[2]) << 8 | UInt32(content[3])
-			guard frameLength<NearbyConnection.SANE_FRAME_LENGTH else {
-				self.lastError=NearbyError.protocolError("Unexpected packet length")
-				self.protocolError()
-				return
-			}
-			self.receiveFrameAsync(length: frameLength)
+			self.receiveFrameAsync()
 		}
 	}
 	
-	private func receiveFrameAsync(length:UInt32){
-		connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { content, contentContext, isComplete, error in
-			if self.connectionClosed{
-				return
+	private func processReadBuffer() {
+		while true {
+			if readBuffer.count >= 4 {
+				let frameLength: UInt32 = UInt32(readBuffer[0]) << 24 | UInt32(readBuffer[1]) << 16 | UInt32(readBuffer[2]) << 8 | UInt32(readBuffer[3])
+				guard frameLength < NearbyConnection.SANE_FRAME_LENGTH else {
+					self.lastError = NearbyError.protocolError("Unexpected packet length")
+					self.protocolError()
+					return
+				}
+				if readBuffer.count >= 4 + Int(frameLength) {
+					let frameData = readBuffer.subdata(in: 4..<4+Int(frameLength))
+					readBuffer.removeSubrange(0..<4+Int(frameLength))
+					self.processReceivedFrame(frameData: frameData)
+					continue
+				}
 			}
-			if isComplete{
-				self.handleConnectionClosure()
-				return
-			}
-			guard let content=content else {
-				self.protocolError()
-				return
-			}
-			self.processReceivedFrame(frameData: content)
-			self.receiveFrameAsync()
+			break
 		}
 	}
 	
@@ -456,6 +455,7 @@ struct InternalFileInfo{
 	let payloadID:Int64
 	let destinationURL:URL
 	var bytesTransferred:Int64=0
+	var lastUIUpdateBytes:Int64=0
 	var fileHandle:FileHandle?
 	var progress:Progress?
 	var created:Bool=false
