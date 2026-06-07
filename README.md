@@ -4,7 +4,7 @@
 
 The app lives in your menu bar and saves files to your downloads folder. It's that simple, really.
 
-### Recent Enhancements (High-Performance Fork)
+### Recent Enhancements
 * **Continuous TCP Read Buffer**: The network reader has been entirely rewritten to use a continuous 1MB socket buffer instead of synchronously ping-ponging packets, unlocking the maximum possible file transfer speeds over your Wi-Fi LAN.
 * **UI Throttling**: Progress updates are smartly throttled to the main thread during high-speed transfers to completely eliminate UI stuttering and app freezes.
 * **Granular Multi-File Cancellation**: In batch transfers, canceling a single file safely aborts it and sends precise payload offset signals to the Android sender so the next file begins instantly without timeout delays.
