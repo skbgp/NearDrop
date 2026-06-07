@@ -8,6 +8,7 @@
 import Cocoa
 import UserNotifications
 import NearbyShare
+import SwiftUI
 
 @main
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, MainAppDelegate{
@@ -19,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 		menu.addItem(withTitle: NSLocalizedString("VisibleToEveryone", value: "Visible to everyone", comment: ""), action: nil, keyEquivalent: "")
 		menu.addItem(withTitle: String(format: NSLocalizedString("DeviceName", value: "Device name: %@", comment: ""), arguments: [Host.current().localizedName!]), action: nil, keyEquivalent: "")
 		menu.addItem(NSMenuItem.separator())
+		menu.addItem(withTitle: NSLocalizedString("ChangeSaveDestination", value: "Change Save Destination...", comment: ""), action: #selector(changeSaveDestination), keyEquivalent: "")
 		menu.addItem(withTitle: NSLocalizedString("Quit", value: "Quit NearDrop", comment: ""), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
 		statusItem=NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 		statusItem?.button?.image=NSImage(named: "MenuBarIcon")
@@ -72,6 +74,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 		}
 	}
 	
+	@objc func changeSaveDestination() {
+		let openPanel = NSOpenPanel()
+		openPanel.canChooseFiles = false
+		openPanel.canChooseDirectories = true
+		openPanel.canCreateDirectories = true
+		openPanel.prompt = NSLocalizedString("Select", value: "Select", comment: "")
+		openPanel.message = NSLocalizedString("SelectSaveDestination", value: "Select a folder to save incoming transfers", comment: "")
+		
+		NSApp.activate(ignoringOtherApps: true)
+		if openPanel.runModal() == .OK {
+			if let url = openPanel.url {
+				do {
+					let bookmarkData = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+					SaveDestinationManager.shared.customDestinationBookmark = bookmarkData
+				} catch {
+					print("Failed to create bookmark data: \(error)")
+				}
+			}
+		}
+	}
+	
 	func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
 		let transferID=response.notification.request.content.userInfo["transferID"]! as! String
 		NearbyConnectionManager.shared.submitUserConsent(transferID: transferID, accept: response.actionIdentifier=="ACCEPT")
@@ -90,22 +113,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 		}else{
 			fileStr=String.localizedStringWithFormat(NSLocalizedString("NFiles", value: "%d files", comment: ""), transfer.files.count)
 		}
-		let notificationContent=UNMutableNotificationContent()
-		notificationContent.title="NearDrop"
-		notificationContent.subtitle=String(format:NSLocalizedString("PinCode", value: "PIN: %@", comment: ""), arguments: [transfer.pinCode!])
-		notificationContent.body=String(format: NSLocalizedString("DeviceSendingFiles", value: "%1$@ is sending you %2$@", comment: ""), arguments: [device.name, fileStr])
-		notificationContent.sound = .default
-		notificationContent.categoryIdentifier="INCOMING_TRANSFERS"
-		notificationContent.userInfo=["transferID": transfer.id]
-		if #available(macOS 11.0, *){
-			NDNotificationCenterHackery.removeDefaultAction(notificationContent)
-		}
-		let notificationReq=UNNotificationRequest(identifier: "transfer_"+transfer.id, content: notificationContent, trigger: nil)
-		UNUserNotificationCenter.current().add(notificationReq)
+		
 		self.activeIncomingTransfers[transfer.id]=TransferInfo(device: device, transfer: transfer)
+		
+		DispatchQueue.main.async {
+			let alert = NSAlert()
+			alert.messageText = "Incoming Transfer from \(device.name)"
+			alert.informativeText = "PIN: \(transfer.pinCode ?? "")\n\n\(device.name) is sending you \(fileStr)."
+			alert.alertStyle = .informational
+			alert.addButton(withTitle: NSLocalizedString("Accept", comment: ""))
+			alert.addButton(withTitle: NSLocalizedString("Decline", comment: ""))
+			
+			NSApp.activate(ignoringOtherApps: true)
+			let response = alert.runModal()
+			let accepted = (response == .alertFirstButtonReturn)
+			NearbyConnectionManager.shared.submitUserConsent(transferID: transfer.id, accept: accepted)
+			if !accepted {
+				self.activeIncomingTransfers.removeValue(forKey: transfer.id)
+			}
+		}
 	}
 	
 	func incomingTransfer(id: String, didFinishWith error: Error?) {
+		ProgressStateManager.shared.removeTransfersForConnection(id: id)
 		guard let transfer=self.activeIncomingTransfers[id] else {return}
 		if let error=error{
 			let notificationContent=UNMutableNotificationContent()
@@ -129,12 +159,190 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 			notificationContent.categoryIdentifier="ERRORS"
 			UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "transferError_"+id, content: notificationContent, trigger: nil))
 		}
-		UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["transfer_"+id])
 		self.activeIncomingTransfers.removeValue(forKey: id)
+	}
+	
+	func incomingTransfer(id: String, didStartWith deviceName: String, fileName: String, totalBytes: Int64, connectionId: String) {
+		ProgressStateManager.shared.addTransfer(state: TransferState(id: id, connectionId: connectionId, deviceName: deviceName, fileName: fileName, totalBytes: totalBytes))
+	}
+	
+	func incomingTransfer(id: String, didUpdateProgress bytesTransferred: Int64) {
+		ProgressStateManager.shared.updateTransfer(id: id, bytes: bytesTransferred)
 	}
 }
 
 struct TransferInfo{
 	let device:RemoteDeviceInfo
 	let transfer:TransferMetadata
+}
+
+class TransferState: ObservableObject, Identifiable {
+    let id: String
+    let connectionId: String
+    let deviceName: String
+    let fileName: String
+    let totalBytes: Int64
+    
+    @Published var bytesTransferred: Int64 = 0
+    @Published var speedBytesPerSecond: Double = 0.0
+    
+    private var lastUpdateTime = Date()
+    private var lastBytesTransferred: Int64 = 0
+    
+    init(id: String, connectionId: String, deviceName: String, fileName: String, totalBytes: Int64) {
+        self.id = id
+        self.connectionId = connectionId
+        self.deviceName = deviceName
+        self.fileName = fileName
+        self.totalBytes = totalBytes
+    }
+    
+    func update(bytes: Int64) {
+        DispatchQueue.main.async {
+            let now = Date()
+            let timeDiff = now.timeIntervalSince(self.lastUpdateTime)
+            if timeDiff > 0.5 {
+                let bytesDiff = bytes - self.lastBytesTransferred
+                self.speedBytesPerSecond = Double(bytesDiff) / timeDiff
+                self.lastUpdateTime = now
+                self.lastBytesTransferred = bytes
+            }
+            self.bytesTransferred = bytes
+        }
+    }
+}
+
+class ProgressStateManager: ObservableObject {
+    static let shared = ProgressStateManager()
+    @Published var activeTransfers: [TransferState] = []
+    
+    func addTransfer(state: TransferState) {
+        DispatchQueue.main.async {
+            self.activeTransfers.append(state)
+            if #available(macOS 11.0, *) {
+                ProgressWindowController.shared.showWindow()
+            }
+        }
+    }
+    
+    func updateTransfer(id: String, bytes: Int64) {
+        DispatchQueue.main.async {
+            if let transfer = self.activeTransfers.first(where: { $0.id == id }) {
+                transfer.update(bytes: bytes)
+            }
+        }
+    }
+    
+    func removeTransfer(id: String) {
+        DispatchQueue.main.async {
+            self.activeTransfers.removeAll(where: { $0.id == id })
+            if self.activeTransfers.isEmpty {
+                if #available(macOS 11.0, *) {
+                    ProgressWindowController.shared.hideWindow()
+                }
+            }
+        }
+    }
+    
+    func removeTransfersForConnection(id: String) {
+        DispatchQueue.main.async {
+            self.activeTransfers.removeAll(where: { $0.connectionId == id })
+            if self.activeTransfers.isEmpty {
+                if #available(macOS 11.0, *) {
+                    ProgressWindowController.shared.hideWindow()
+                }
+            }
+        }
+    }
+}
+
+@available(macOS 11.0, *)
+struct ProgressViewUI: View {
+    @ObservedObject var manager = ProgressStateManager.shared
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if manager.activeTransfers.isEmpty {
+                Text("No active transfers")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            } else {
+                ForEach(manager.activeTransfers) { transfer in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("\(transfer.deviceName) - \(transfer.fileName)")
+                            .font(.headline)
+                        
+                        ProgressView(value: Double(transfer.bytesTransferred), total: Double(max(1, transfer.totalBytes)))
+                            .progressViewStyle(LinearProgressViewStyle())
+                        
+                        HStack {
+                            Text(formatBytes(transfer.bytesTransferred) + " / " + formatBytes(transfer.totalBytes))
+                            Spacer()
+                            Text(formatSpeed(transfer.speedBytesPerSecond) + " - " + formatTimeRemaining(transfer: transfer))
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+                    .shadow(radius: 1)
+                }
+            }
+        }
+        .padding()
+        .frame(width: 350)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+    
+    func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+    
+    func formatSpeed(_ speed: Double) -> String {
+        if speed == 0 { return "Calculating..." }
+        return formatBytes(Int64(speed)) + "/s"
+    }
+    
+    func formatTimeRemaining(transfer: TransferState) -> String {
+        if transfer.speedBytesPerSecond == 0 { return "" }
+        let remainingBytes = transfer.totalBytes - transfer.bytesTransferred
+        let seconds = remainingBytes / Int64(transfer.speedBytesPerSecond)
+        if seconds < 60 {
+            return "\(seconds)s left"
+        } else {
+            return "\(seconds / 60)m \(seconds % 60)s left"
+        }
+    }
+}
+
+@available(macOS 11.0, *)
+class ProgressWindowController {
+    static let shared = ProgressWindowController()
+    var window: NSPanel?
+    
+    func showWindow() {
+        if window == nil {
+            let hostingController = NSHostingController(rootView: ProgressViewUI())
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 350, height: 100),
+                                styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView, .closable],
+                                backing: .buffered,
+                                defer: false)
+            panel.title = "NearDrop Transfers"
+            panel.isFloatingPanel = true
+            panel.level = .floating
+            panel.contentViewController = hostingController
+            panel.center()
+            window = panel
+        }
+        window?.makeKeyAndOrderFront(nil)
+    }
+    
+    func hideWindow() {
+        window?.close()
+        window = nil
+    }
 }

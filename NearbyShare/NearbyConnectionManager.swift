@@ -170,6 +170,8 @@ struct EndpointInfo{
 public protocol MainAppDelegate{
 	func obtainUserConsent(for transfer:TransferMetadata, from device:RemoteDeviceInfo)
 	func incomingTransfer(id:String, didFinishWith error:Error?)
+	func incomingTransfer(id:String, didStartWith deviceName:String, fileName:String, totalBytes:Int64, connectionId:String)
+	func incomingTransfer(id:String, didUpdateProgress bytesTransferred:Int64)
 }
 
 public protocol ShareExtensionDelegate:AnyObject{
@@ -270,6 +272,16 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 		guard let delegate=mainAppDelegate else {return}
 		delegate.incomingTransfer(id: connection.id, didFinishWith: error)
 		activeConnections.removeValue(forKey: connection.id)
+	}
+	
+	func connection(connection: InboundNearbyConnection, didStartTransfer id: String, deviceName: String, fileName: String, totalBytes: Int64) {
+		guard let delegate=mainAppDelegate else {return}
+		delegate.incomingTransfer(id: id, didStartWith: deviceName, fileName: fileName, totalBytes: totalBytes, connectionId: connection.id)
+	}
+	
+	func connection(connection: InboundNearbyConnection, didUpdateProgress bytesTransferred: Int64, forTransfer id: String) {
+		guard let delegate=mainAppDelegate else {return}
+		delegate.incomingTransfer(id: id, didUpdateProgress: bytesTransferred)
 	}
 	
 	public func submitUserConsent(transferID:String, accept:Bool){
@@ -493,3 +505,33 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 	}
 }
 
+public class SaveDestinationManager {
+    public static let shared = SaveDestinationManager()
+    
+    public var customDestinationBookmark: Data? {
+        get {
+            return UserDefaults.standard.data(forKey: "SaveDestinationBookmark")
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "SaveDestinationBookmark")
+        }
+    }
+    
+    public func getDownloadsDirectory() -> URL {
+        if let bookmarkData = customDestinationBookmark {
+            var isStale = false
+            do {
+                let url = try URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale)
+                if isStale {
+                    let newBookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+                    customDestinationBookmark = newBookmark
+                }
+                return url
+            } catch {
+                print("Failed to resolve security bookmark: \(error)")
+            }
+        }
+        
+        return (try! FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)).resolvingSymlinksInPath()
+    }
+}

@@ -22,6 +22,7 @@ class InboundNearbyConnection: NearbyConnection{
 	private var cipherCommitment:Data?
 	
 	private var textPayloadID:Int64=0
+	private var accessedSecurityScopedURL: URL?
 	
 	enum State{
 		case initial, receivedConnectionRequest, sentUkeyServerInit, receivedUkeyClientFinish, sentConnectionResponse, sentPairedKeyResult, receivedPairedKeyResult, waitingForUserConsent, receivingFiles, disconnected
@@ -33,6 +34,7 @@ class InboundNearbyConnection: NearbyConnection{
 	
 	override func handleConnectionClosure() {
 		super.handleConnectionClosure()
+		accessedSecurityScopedURL?.stopAccessingSecurityScopedResource()
 		currentState = .disconnected
 		do{
 			try deletePartiallyReceivedFiles()
@@ -106,6 +108,7 @@ class InboundNearbyConnection: NearbyConnection{
 			fileInfo.fileHandle?.write(frame.payloadChunk.body)
 			transferredFiles[id]!.bytesTransferred+=Int64(frame.payloadChunk.body.count)
 			fileInfo.progress?.completedUnitCount=transferredFiles[id]!.bytesTransferred
+			delegate?.connection(connection: self, didUpdateProgress: transferredFiles[id]!.bytesTransferred, forTransfer: String(id))
 		}else if (frame.payloadChunk.flags & 1)==1{
 			try fileInfo.fileHandle?.close()
 			transferredFiles[id]!.fileHandle=nil
@@ -128,6 +131,7 @@ class InboundNearbyConnection: NearbyConnection{
 			fileInfo.fileHandle?.write(payload)
 			transferredFiles[id]!.bytesTransferred+=Int64(payload.count)
 			fileInfo.progress?.completedUnitCount=transferredFiles[id]!.bytesTransferred
+			delegate?.connection(connection: self, didUpdateProgress: transferredFiles[id]!.bytesTransferred, forTransfer: String(id))
 			try fileInfo.fileHandle?.close()
 			transferredFiles[id]!.fileHandle=nil
 			fileInfo.progress?.unpublish()
@@ -302,8 +306,13 @@ class InboundNearbyConnection: NearbyConnection{
 	private func processIntroductionFrame(_ frame:Sharing_Nearby_Frame) throws{
 		guard frame.hasV1, frame.v1.hasIntroduction else { throw NearbyError.requiredFieldMissing("shareNearbyFrame.v1.introduction") }
 		currentState = .waitingForUserConsent
+		
+		let downloadsDirectory = SaveDestinationManager.shared.getDownloadsDirectory()
+		if downloadsDirectory.startAccessingSecurityScopedResource() {
+			accessedSecurityScopedURL = downloadsDirectory
+		}
+		
 		if frame.v1.introduction.fileMetadata.count>0 && frame.v1.introduction.textMetadata.isEmpty{
-			let downloadsDirectory=(try FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)).resolvingSymlinksInPath()
 			for file in frame.v1.introduction.fileMetadata{
 				let dest=makeFileDestinationURL(downloadsDirectory.appendingPathComponent(file.name))
 				let info=InternalFileInfo(meta: FileMetadata(name: file.name, size: file.size, mimeType: file.mimeType),
@@ -324,7 +333,6 @@ class InboundNearbyConnection: NearbyConnection{
 					self.delegate?.obtainUserConsent(for: metadata, from: self.remoteDeviceInfo!, connection: self)
 				}
 			}else if case .text=meta.type{
-				let downloadsDirectory=(try FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)).resolvingSymlinksInPath()
 				let dateFormatter=DateFormatter()
 				dateFormatter.dateFormat="yyyy-MM-dd HH.mm.ss"
 				let dest=makeFileDestinationURL(downloadsDirectory.appendingPathComponent("\(dateFormatter.string(from: Date())).txt"))
@@ -367,6 +375,7 @@ class InboundNearbyConnection: NearbyConnection{
 				progress.publish()
 				transferredFiles[id]!.progress=progress
 				transferredFiles[id]!.created=true
+				delegate?.connection(connection: self, didStartTransfer: String(id), deviceName: remoteDeviceInfo?.name ?? "Unknown", fileName: file.meta.name, totalBytes: file.meta.size)
 			}
 			
 			var frame=Sharing_Nearby_Frame()
@@ -406,4 +415,6 @@ class InboundNearbyConnection: NearbyConnection{
 protocol InboundNearbyConnectionDelegate{
 	func obtainUserConsent(for transfer:TransferMetadata, from device:RemoteDeviceInfo, connection:InboundNearbyConnection)
 	func connectionWasTerminated(connection:InboundNearbyConnection, error:Error?)
+	func connection(connection:InboundNearbyConnection, didStartTransfer id: String, deviceName: String, fileName: String, totalBytes: Int64)
+	func connection(connection:InboundNearbyConnection, didUpdateProgress bytesTransferred: Int64, forTransfer id: String)
 }
